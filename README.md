@@ -123,6 +123,29 @@ to leave behind, and optionally fill `target_path` (relative to the target
 group) to rename or move a single project. The `my_access` column shows your
 role on each project, which helps when filtering a `--scope all` listing.
 
+### Excluding projects
+
+`list`, `checkout` and `push` accept exclusion patterns, given directly
+(`--exclude PATTERN`) or in files (`--exclude-file FILE`), both repeatable.
+One pattern per line, `#` starts a comment, and clone URLs can be pasted as is:
+
+```
+# exclude.txt
+fhg-intern                      # a group and everything below it
+fhgdemo/**/test*                # ** spans any number of levels, * stays in one
+network/automation/testprojekt*
+git@gitlab.example.org:huginn/huginn.git
+```
+
+Patterns are matched case-insensitively against the project path. A pattern
+also matches everything below it, so `fhg` excludes `fhg/ai/tool` but not
+`fhg-intern/x`. `list` keeps excluded projects in `repos.csv` with
+`migrate=no`; `checkout` and `push` skip them, even if the CSV says `yes`.
+
+```bash
+ratatoskr list --exclude-file exclude.txt
+```
+
 ### 2. Checkout (download)
 
 ```bash

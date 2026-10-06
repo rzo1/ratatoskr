@@ -23,6 +23,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from ratatoskr import progress
+from ratatoskr.excludes import Excludes
 from ratatoskr.exporter import ProjectExporter
 from ratatoskr.gitops import (
     askpass_env,
@@ -148,6 +149,7 @@ def export_all(source, repos, args):
 
 def checkout(args):
     export = args.issues or args.mrs
+    excludes = Excludes.from_args(args)
     if args.from_csv and not export:
         session = nullcontext(None)
     else:
@@ -158,7 +160,8 @@ def checkout(args):
             print(f"{len(repos)} repos selected in {args.from_csv}")
         else:
             repos = list_projects(source, args)
-            write_outputs(repos, args.out_dir)
+            write_outputs(repos, args.out_dir, excludes)
+        repos = excludes.filter(repos)
         if not repos:
             print("Nothing to clone.")
             return 0
@@ -339,7 +342,7 @@ def push_one(api, root, r, args, env):
 
 
 def push(args):
-    repos = read_csv_selection(args.from_csv)
+    repos = Excludes.from_args(args).filter(read_csv_selection(args.from_csv))
     base = with_scheme(args.target_url)
     print(f"{len(repos)} repos selected in {args.from_csv}, target {base}")
 
@@ -390,6 +393,22 @@ def push(args):
 # ---------------------------------------------------------------- CLI
 
 
+def add_exclude_args(p):
+    p.add_argument(
+        "--exclude",
+        action="append",
+        metavar="PATTERN",
+        help="skip projects matching this path pattern, e.g. 'fhg-intern' or 'fhg/**/test*' "
+        "(repeatable)",
+    )
+    p.add_argument(
+        "--exclude-file",
+        action="append",
+        metavar="FILE",
+        help="file with one exclude pattern or clone URL per line, # for comments (repeatable)",
+    )
+
+
 def add_list_args(p):
     p.add_argument(
         "--source-url",
@@ -430,6 +449,7 @@ def add_list_args(p):
     )
     p.add_argument("--profile-dir", default=".browser-profile")
     p.add_argument("--out-dir", default=".", help="where repos.{json,csv,txt} are written")
+    add_exclude_args(p)
 
 
 def add_content_args(p, verb):
@@ -538,6 +558,7 @@ def build_parser():
         "(exact mirror on re-sync)",
     )
     add_content_args(p_push, "import")
+    add_exclude_args(p_push)
     p_push.add_argument(
         "--keep-mentions",
         action="store_true",
@@ -571,7 +592,7 @@ def main():
 
     if args.mode == "list":
         with open_source(args) as source:
-            write_outputs(list_projects(source, args), args.out_dir)
+            write_outputs(list_projects(source, args), args.out_dir, Excludes.from_args(args))
         print(
             "Edit repos.csv: set migrate=no to skip, fill target_path to override the destination."
         )

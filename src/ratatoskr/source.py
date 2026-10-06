@@ -237,17 +237,28 @@ def list_projects(source, args):
     return projects
 
 
-def write_outputs(projects, out_dir):
+def write_outputs(projects, out_dir, excludes=None):
+    """Write repos.json (all), repos.csv (excluded ones with migrate=no), repos.txt (selected)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "repos.json").write_text(json.dumps(projects, indent=2, ensure_ascii=False))
+    selected = []
     with open(out / "repos.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["migrate", "target_path", "my_access", *FIELDS])
         for pr in projects:
-            w.writerow(["yes", "", my_access(pr), *(pr.get(k, "") for k in FIELDS)])
-    (out / "repos.txt").write_text("".join(pr["ssh_url_to_repo"] + "\n" for pr in projects))
-    print(f"\n{len(projects)} projects written to {out}/repos.{{json,csv,txt}}")
+            keep = not (excludes and excludes.matches(pr["path_with_namespace"]))
+            if keep:
+                selected.append(pr)
+            w.writerow(
+                ["yes" if keep else "no", "", my_access(pr), *(pr.get(k, "") for k in FIELDS)]
+            )
+    (out / "repos.txt").write_text("".join(pr["ssh_url_to_repo"] + "\n" for pr in selected))
+    excluded = len(projects) - len(selected)
+    print(
+        f"\n{len(projects)} projects written to {out}/repos.{{json,csv,txt}}"
+        + (f" ({excluded} excluded: migrate=no)" if excluded else "")
+    )
 
 
 def read_csv_selection(path):
