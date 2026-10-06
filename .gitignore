@@ -19,6 +19,7 @@ venv/
 # Project
 .browser-profile/
 mirrors/
+tmp/
 repos.csv
 repos.json
 repos.txt
