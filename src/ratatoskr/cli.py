@@ -35,6 +35,7 @@ from ratatoskr.gitops import (
     has_git_lfs,
     install_hint,
     lfs_fetch,
+    lfs_problem,
     lfs_push,
     local_repo,
     prune_refs,
@@ -114,9 +115,11 @@ def _checkout_one(r, path, url_key, args, env, stages):
     try:
         if args.lfs:
             stages[path] = "LFS"
-            count = lfs_fetch(dest, env)
-            if count is None:
+            pointers, count = lfs_fetch(dest, env, args.lfs_timeout, args.skip_lfs_projects)
+            if pointers is None:
                 extras.append("LFS skipped: git-lfs not installed")
+            elif lfs_problem(dest):
+                extras.append("LFS PROBLEM - see the warning at the end")
             elif count:
                 extras.append(f"{count} LFS objects")
         if args.wiki:
@@ -173,6 +176,45 @@ def clone_all(repos, username, args):
     return failed
 
 
+def lfs_problems(repos, mirror_dir):
+    """[(path, problem)] of the local clones with a recorded LFS problem."""
+    problems = []
+    for r in repos:
+        repo_dir, _ = local_repo(mirror_dir, r["path_with_namespace"])
+        if repo_dir and (problem := lfs_problem(repo_dir)):
+            problems.append((r["path_with_namespace"], problem))
+    return problems
+
+
+def warning_box(title, items, hints):
+    bar = "!" * 79
+    print(f"\n{bar}\n!!  WARNING: {title}\n!!")
+    for path, problem in items:
+        print(f"!!    {path}\n!!        {problem}")
+    print("!!")
+    for hint in hints:
+        print(f"!!  {hint}")
+    print(bar)
+
+
+def warn_lfs_problems(problems, step):
+    if not problems:
+        return
+    if step == "download":
+        hints = [
+            "Their code, wiki and issues were downloaded, but NOT their LFS files.",
+            "'migrate' skips these projects, because the target would reject them.",
+            "Run 'download' again once the source serves the LFS files (e.g. after the",
+            "admins fixed the object storage), then 'migrate'.",
+        ]
+    else:
+        hints = [
+            "These projects were NOT migrated: their LFS files are missing locally.",
+            "Run 'download' again once the source serves the LFS files, then 'migrate'.",
+        ]
+    warning_box(f"{len(problems)} project(s) with LFS problems", problems, hints)
+
+
 def clone_status(done, total, stages, started):
     elapsed = int(time.monotonic() - started)
     running = ", ".join(f"{path} ({step})" for path, step in list(stages.items()))
@@ -223,10 +265,15 @@ def checkout(args):
         if export:
             failed += [p for p in export_all(source, repos, args) if p not in failed]
 
-    print(f"\nDone. {len(repos) - len(failed)} ok, {len(failed)} failed.")
+    problems = lfs_problems(repos, args.dest) if args.lfs else []
+    print(
+        f"\nDone. {len(repos) - len(failed)} ok, {len(failed)} failed"
+        + (f", {len(problems)} with LFS problems." if problems else ".")
+    )
     for path in failed:
         print("  failed:", path)
-    return 1 if failed else 0
+    warn_lfs_problems(problems, "download")
+    return 1 if failed or problems else 0
 
 
 # ---------------------------------------------------------------- push
@@ -351,6 +398,9 @@ def push_one(api, root, r, args, env):
     print(f"{src} -> {full}")
 
     repo_dir, working_copy = local_repo(args.mirror_dir, src)
+    if repo_dir and (problem := lfs_problem(repo_dir)):
+        print(f"   SKIPPED - LFS problem: {problem}")
+        return "lfs"
     wiki_dir = Path(args.mirror_dir) / f"{src}.wiki.git"
     empty_source = str(r.get("empty_repo", "")).lower() == "true"
     no_repository = not repo_dir and (has_no_repository(r) or wiki_dir.exists())
@@ -425,7 +475,7 @@ def push(args):
     # HTTPS git and LFS authenticate with the same PAT; GitLab accepts any username with it
     env, askpass = askpass_env("oauth2", token) if args.protocol == "https" else (ssh_env(), None)
 
-    results = {"ok": [], "skipped": [], "failed": []}
+    results = {"ok": [], "skipped": [], "lfs": [], "failed": []}
     try:
         for i, r in enumerate(repos, 1):
             print(f"[{i}/{len(repos)}] ", end="")
@@ -440,11 +490,17 @@ def push(args):
 
     print(
         f"\nDone. {len(results['ok'])} ok, {len(results['skipped'])} skipped, "
-        f"{len(results['failed'])} failed."
+        f"{len(results['failed'])} failed"
+        + (f", {len(results['lfs'])} skipped because of LFS problems." if results["lfs"] else ".")
     )
     for path in results["failed"]:
         print("  failed:", path)
-    return 1 if results["failed"] else 0
+    warn_lfs_problems(lfs_problems_of(results["lfs"], args.mirror_dir), "migrate")
+    return 1 if results["failed"] or results["lfs"] else 0
+
+
+def lfs_problems_of(paths, mirror_dir):
+    return lfs_problems([{"path_with_namespace": p} for p in paths], mirror_dir)
 
 
 # ---------------------------------------------------------------- CLI
@@ -554,6 +610,19 @@ def build_parser():
         help="normal clones with a checked-out branch instead of bare mirrors",
     )
     p_co.add_argument("-j", "--jobs", type=int, default=4, help="parallel clones (default: 4)")
+    p_co.add_argument(
+        "--lfs-timeout",
+        type=int,
+        default=120,
+        metavar="SECONDS",
+        help="give up an LFS download that makes no progress for this long (default: 120)",
+    )
+    p_co.add_argument(
+        "--skip-lfs-projects",
+        action="store_true",
+        help="don't download LFS files at all; repos that use LFS are marked and skipped "
+        "by 'migrate' (e.g. while the source's LFS storage is broken)",
+    )
     add_content_args(p_co, "fetch")
 
     p_push = sub.add_parser(

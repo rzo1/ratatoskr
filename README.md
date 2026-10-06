@@ -184,6 +184,8 @@ needs the browser session, so the login window opens unless you pass
 | `--working-copy`             | Normal clones with a checked-out branch instead of bare mirrors       |
 | `-j N`, `--jobs N`           | Parallel clones (default: 4)                                          |
 | `--no-lfs`                   | Don't fetch Git LFS objects                                           |
+| `--lfs-timeout SECONDS`      | Give up an LFS download without progress for this long (default: 120) |
+| `--skip-lfs-projects`        | Don't download LFS files; repos using LFS are marked and skipped      |
 | `--no-wiki`                  | Don't clone wikis                                                     |
 | `--no-issues`                | Don't export issues                                                   |
 | `--no-mrs`                   | Don't export merge requests                                           |
@@ -295,8 +297,15 @@ Everything on the target is created by the PAT's user, so some details change:
   pushed — the target would reject them. Annotated tags stay annotated.
 - **LFS**: objects are fetched during `checkout` (`git lfs fetch --all`) and
   uploaded before the code is pushed, because GitLab rejects pushes whose LFS
-  objects it does not have. Without `git-lfs` installed, `checkout` skips LFS
-  with a note and `push` fails for repos that have LFS objects.
+  objects it does not have. Repos without LFS files skip this step.
+- **Broken LFS on the source**: if LFS files cannot be downloaded — e.g. the
+  source's object storage refuses them (`InvalidAccessKeyId`), or the download
+  makes no progress for `--lfs-timeout` seconds — the project is marked, its
+  code, wiki and issues are still downloaded, and a big warning lists it at the
+  end (exit code 1). `push` skips marked projects with the same warning, since
+  the target would reject them. The next `checkout` retries and clears the mark
+  once the LFS files are available. `--skip-lfs-projects` marks all LFS projects
+  without even trying.
 - **Wikis** are pushed without force, so pages added on the target (such as
   the merge request archive) are never overwritten. If the source wiki changes
   after the first push, the wiki push fails with a hint instead.

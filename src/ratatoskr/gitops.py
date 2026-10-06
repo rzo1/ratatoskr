@@ -6,6 +6,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # answers git's username/password prompts from env vars, so tokens never end up in remote URLs
@@ -202,20 +203,101 @@ def install_hint(package):
     return f"sudo apt install {package}   (Fedora: sudo dnf install {package})"
 
 
-def lfs_object_count(repo):
+LFS_PROBLEM_FILE = "ratatoskr-lfs-problem"
+
+
+class LfsError(RuntimeError):
+    pass
+
+
+def git_dir(repo):
     repo = Path(repo)
-    for objects in (repo / "lfs" / "objects", repo / ".git" / "lfs" / "objects"):
-        if objects.is_dir():
-            return sum(1 for f in objects.rglob("*") if f.is_file())
-    return 0
+    return repo / ".git" if (repo / ".git").is_dir() else repo
 
 
-def lfs_fetch(repo, env):
-    """Fetch all LFS objects of all refs from origin; returns the number of local objects."""
+def lfs_object_count(repo):
+    objects = git_dir(repo) / "lfs" / "objects"
+    return sum(1 for f in objects.rglob("*") if f.is_file()) if objects.is_dir() else 0
+
+
+def lfs_pointer_count(repo, env=None):
+    """Number of LFS files referenced in any branch or tag (0 = the repo does not use LFS)."""
+    return len(run_git(["lfs", "ls-files", "--all", "--name-only"], repo, env).splitlines())
+
+
+def lfs_problem(repo):
+    """The recorded LFS problem of a local clone, or None."""
+    marker = git_dir(repo) / LFS_PROBLEM_FILE
+    return marker.read_text().strip() if marker.exists() else None
+
+
+def set_lfs_problem(repo, problem):
+    marker = git_dir(repo) / LFS_PROBLEM_FILE
+    if problem:
+        marker.write_text(problem + "\n")
+    else:
+        marker.unlink(missing_ok=True)
+
+
+def _dir_size(path):
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) if path.is_dir() else 0
+
+
+def run_watched(args, cwd, env, watch_dir, stall_timeout, poll=2.0):
+    """Run git, but kill it when ``watch_dir`` has not grown for ``stall_timeout`` seconds."""
+    with tempfile.TemporaryFile("w+") as err:
+        proc = subprocess.Popen(
+            ["git", *args],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+            text=True,
+        )
+        size, last_change = _dir_size(watch_dir), time.monotonic()
+        while True:
+            try:
+                proc.wait(timeout=poll)
+                break
+            except subprocess.TimeoutExpired:
+                current = _dir_size(watch_dir)
+                if current != size:
+                    size, last_change = current, time.monotonic()
+                elif time.monotonic() - last_change > stall_timeout:
+                    proc.kill()
+                    proc.wait()
+                    raise LfsError(f"no download progress for {stall_timeout}s") from None
+        if proc.returncode != 0:
+            err.seek(0)
+            raise LfsError(git_error(err.read()))
+
+
+def lfs_fetch(repo, env, stall_timeout=120, skip_lfs_projects=False):
+    """Fetch all LFS objects of all refs from origin.
+
+    Returns (pointers, objects): the number of LFS files the repo references and of the
+    objects now available locally; (None, 0) if git-lfs is not installed. Problems (stalled
+    or failed download, or skipped on request) are recorded with ``set_lfs_problem``.
+    """
     if not has_git_lfs():
-        return None
-    run_git(["lfs", "fetch", "--all", "origin"], repo, env)
-    return lfs_object_count(repo)
+        return None, 0
+    pointers = lfs_pointer_count(repo, env)
+    if not pointers:
+        set_lfs_problem(repo, None)
+        return 0, 0
+    if skip_lfs_projects:
+        set_lfs_problem(repo, f"{pointers} LFS files not downloaded (--skip-lfs-projects)")
+        return pointers, lfs_object_count(repo)
+    try:
+        run_watched(
+            ["lfs", "fetch", "--all", "origin"], repo, env, git_dir(repo) / "lfs", stall_timeout
+        )
+    except LfsError as e:
+        set_lfs_problem(repo, f"{pointers} LFS files could not be downloaded: {e}")
+        return pointers, lfs_object_count(repo)
+    set_lfs_problem(repo, None)
+    return pointers, lfs_object_count(repo)
 
 
 def lfs_push(url, repo, env):

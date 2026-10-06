@@ -237,4 +237,4 @@ def test_lfs_push_needs_git_lfs_when_objects_exist(tmp_path, monkeypatch):
     monkeypatch.setattr(gitops, "has_git_lfs", lambda: False)
     with pytest.raises(RuntimeError, match="git-lfs is not installed"):
         gitops.lfs_push("url", repo, {})
-    assert gitops.lfs_fetch(repo, {}) is None
+    assert gitops.lfs_fetch(repo, {}) == (None, 0)
