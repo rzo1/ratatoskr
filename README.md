@@ -249,6 +249,8 @@ for git, each repo is migrated:
 | `--no-mrs`               | Don't import merge requests                                                  |
 | `--keep-mentions`        | Keep `@mentions` as they are (see below)                                     |
 | `--archive`              | Archive target projects whose source project is archived                     |
+| `--api-retries N`        | Retries when the target rate-limits a request (default: 8)                   |
+| `--write-delay SECONDS`  | Pause before every write request, to stay below rate limits (default: 0)     |
 | `--dry-run`              | Show what would be created and pushed; nothing is written                    |
 | `-y`, `--yes`            | Don't ask for confirmation of the plan                                       |
 
@@ -314,6 +316,11 @@ Everything on the target is created by the PAT's user, so some details change:
   `--update-existing`, the code of projects that already have content is
   skipped, so nothing is overwritten by accident. Force pushes to protected
   branches may still be rejected by the target's branch protection.
+- **Rate limits on the target**: GitLab limits e.g. how fast wiki pages can be
+  created, which the merge request archive does a lot. `429` and "rate limited"
+  answers are retried after the time the server asks for (or 10 s, 20 s, ...
+  up to 2 min). If you hit the limit constantly, slow down all writes with
+  `--write-delay 2`.
 - **Token safety**: HTTPS credentials are handed to git and git-lfs through a
   temporary `GIT_ASKPASS` script that reads them from the environment and is
   deleted afterwards. Tokens never end up in remote URLs, `.git/config` or the

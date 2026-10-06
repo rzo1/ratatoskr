@@ -1,6 +1,12 @@
-"""Write side: the target GitLab, accessed via REST API with a personal access token."""
+"""Write side: the target GitLab, accessed via REST API with a personal access token.
+
+The target may rate-limit (e.g. wiki page creation): 429 answers and 400 "rate limited"
+answers are retried after the time the server asks for (Retry-After / RateLimit-Reset) or
+with exponential backoff. ``write_delay`` paces all writes to stay below the limits.
+"""
 
 import sys
+import time
 from urllib.parse import quote
 
 from ratatoskr.source import max_access_level
@@ -10,19 +16,50 @@ def enc(path):
     return quote(str(path), safe="")
 
 
+MAX_BACKOFF = 120
+
+
+def is_rate_limited(resp):
+    return resp.status_code == 429 or (
+        resp.status_code == 400 and "rate limit" in resp.text.lower()
+    )
+
+
+def retry_delay(resp, attempt):
+    """Seconds to wait before the next attempt, as the server asks or exponential."""
+    headers = {k.lower(): v for k, v in resp.headers.items()}
+    if headers.get("retry-after", "").isdigit():
+        return min(int(headers["retry-after"]) + 1, MAX_BACKOFF)
+    if headers.get("ratelimit-reset", "").isdigit():
+        return min(max(int(headers["ratelimit-reset"]) - int(time.time()), 1) + 1, MAX_BACKOFF)
+    return min(10 * 2**attempt, MAX_BACKOFF)
+
+
 class TargetApi:
-    def __init__(self, base, token, dry_run=False):
+    def __init__(self, base, token, dry_run=False, retries=8, write_delay=0.0):
         import requests
 
         self.api = f"{base}/api/v4"
         self.dry_run = dry_run
+        self.retries = retries
+        self.write_delay = write_delay
         self.session = requests.Session()
         self.session.headers["PRIVATE-TOKEN"] = token
         self.groups = {}  # full_path -> group id (None = would be created in a dry run)
         self.user = None
 
     def call(self, method, path, **kwargs):
-        resp = self.session.request(method, f"{self.api}{path}", timeout=120, **kwargs)
+        attempt = 0
+        while True:
+            if method != "GET" and self.write_delay:
+                time.sleep(self.write_delay)
+            resp = self.session.request(method, f"{self.api}{path}", timeout=120, **kwargs)
+            if not is_rate_limited(resp) or attempt >= self.retries:
+                break
+            delay = retry_delay(resp, attempt)
+            print(f"   target rate limit on {method} {path}, waiting {delay}s ...", flush=True)
+            time.sleep(delay)
+            attempt += 1
         if not resp.ok and resp.status_code != 404:
             raise RuntimeError(f"{method} {path} -> {resp.status_code}: {resp.text[:300]}")
         return resp

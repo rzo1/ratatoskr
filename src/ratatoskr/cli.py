@@ -456,7 +456,7 @@ def push(args):
     token = os.environ.get("RATATOSKR_TARGET_TOKEN") or getpass.getpass(
         f"Personal access token for {base} (scope 'api'): "
     )
-    api = TargetApi(base, token, args.dry_run)
+    api = TargetApi(base, token, args.dry_run, args.api_retries, args.write_delay)
     user = api.check_token()
     root = api.root_group(args.group)
     print(
@@ -692,6 +692,20 @@ def build_parser():
     )
     p_push.add_argument(
         "--archive", action="store_true", help="archive targets whose source is archived"
+    )
+    p_push.add_argument(
+        "--api-retries",
+        type=int,
+        default=8,
+        help="retries when the target rate-limits a request, with growing pauses (default: 8)",
+    )
+    p_push.add_argument(
+        "--write-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="pause before every write request to the target, to stay below its rate "
+        "limits (e.g. 1.5; default: 0)",
     )
     p_push.add_argument(
         "--dry-run", action="store_true", help="only show what would be created/pushed"
