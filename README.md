@@ -30,16 +30,16 @@ local export uses Freki's format.
 ## How it works
 
 ```
- source GitLab (SSO, read-only)        local                         target GitLab
-┌───────────────────────┐  list   ┌────────────────────┐  push   ┌──────────────────────────┐
-│ browser login         │ ──────▶ │ repos.csv (edit!)  │ ──────▶ │ group/subgroup/project   │
-│ REST API via session  │         │                    │         │  (created via API)       │
-│                       │checkout │ mirrors/grp/       │         │  branches, tags, LFS     │
-│ git over ssh/https    │ ──────▶ │  x.git  x.wiki.git │         │  wiki                    │
-│ issues, MRs, uploads  │         │  x-issues/  x-merge-requests/│  labels, milestones      │
-│                       │         │  x-meta.json       │         │  issues + comments       │
-└───────────────────────┘         └────────────────────┘         │  MRs as wiki pages       │
-                                                                 └──────────────────────────┘
+  source GitLab (SSO)                          local disk                            target GitLab
+┌──────────────────────┐                ┌──────────────────────┐                ┌──────────────────────┐
+│ browser login        │ ─ list ──────> │ repos.csv (edit it!) │                │ subgroups + projects │
+│ REST API via session │                │ <dest>/<group>/      │                │ branches, tags, LFS  │
+│ issues, MRs, uploads │                │   x.git              │                │ wiki                 │
+│ git over SSH/HTTPS   │ ─ download ──> │   x.wiki.git         │ ─ migrate ───> │ labels, milestones   │
+│                      │                │   x-issues/          │                │ issues + comments    │
+│                      │                │   x-merge-requests/  │                │ MRs as wiki pages    │
+│                      │                │   x-meta.json        │                │                      │
+└──────────────────────┘                └──────────────────────┘                └──────────────────────┘
 ```
 
 1. **`list`** — opens Chromium, you log in via SSO, the projects are read from
