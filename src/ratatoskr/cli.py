@@ -30,6 +30,7 @@ from ratatoskr.gitops import (
     askpass_env,
     clone_one,
     clone_wiki,
+    git_error,
     has_git,
     has_git_lfs,
     install_hint,
@@ -72,10 +73,6 @@ def https_env(username):
     return askpass_env(user, getpass.getpass("Token: "))
 
 
-def last_line(text):
-    return (text.strip().splitlines() or ["(no output)"])[-1]
-
-
 def open_source(args):
     return SourceSession(
         args.source_url, args.profile_dir, args.login_timeout, args.source_timeout, args.retries
@@ -98,13 +95,21 @@ def checkout_one(r, url_key, args, env, stages=None):
         stages.pop(path, None)
 
 
+def has_no_repository(r):
+    return str(r.get("repository_access_level", "")).lower() == "disabled"
+
+
 def _checkout_one(r, path, url_key, args, env, stages):
     root = Path(args.dest)
     dest = root / (path if args.working_copy else f"{path}.git")
+    wiki_dest = root / f"{path}.wiki.git"
+    if has_no_repository(r):
+        return checkout_wiki_only(r, path, url_key, args, env, stages, None)
     stages[path] = "fetching" if dest.exists() else "cloning"
     action, res = clone_one(r[url_key], dest, args.working_copy, env)
     if res.returncode != 0:
-        return False, f"FAILED   {path}\n    {last_line(res.stderr)}"
+        # projects with the repository feature turned off can still have a wiki
+        return checkout_wiki_only(r, path, url_key, args, env, stages, git_error(res.stderr))
     extras = []
     try:
         if args.lfs:
@@ -116,11 +121,22 @@ def _checkout_one(r, path, url_key, args, env, stages):
                 extras.append(f"{count} LFS objects")
         if args.wiki:
             stages[path] = "wiki"
-        if args.wiki and clone_wiki(r[url_key], root / f"{path}.wiki.git", env) != "none":
+        if args.wiki and clone_wiki(r[url_key], wiki_dest, env) != "none":
             extras.append("wiki")
     except RuntimeError as e:
         return False, f"FAILED   {path}\n    {e}"
     return True, f"{action:8} {path}" + (f" ({', '.join(extras)})" if extras else "")
+
+
+def checkout_wiki_only(r, path, url_key, args, env, stages, clone_error):
+    """Project without a git repository: only its wiki (if any) can be mirrored."""
+    if args.wiki:
+        stages[path] = "wiki"
+        if clone_wiki(r[url_key], Path(args.dest) / f"{path}.wiki.git", env) != "none":
+            return True, f"wiki     {path} (the project has no repository, only a wiki)"
+    if clone_error is None:
+        return True, f"skipped  {path} (repository disabled on the source, no wiki)"
+    return False, f"FAILED   {path}\n    {clone_error}"
 
 
 def clone_all(repos, username, args):
@@ -335,8 +351,10 @@ def push_one(api, root, r, args, env):
     print(f"{src} -> {full}")
 
     repo_dir, working_copy = local_repo(args.mirror_dir, src)
+    wiki_dir = Path(args.mirror_dir) / f"{src}.wiki.git"
     empty_source = str(r.get("empty_repo", "")).lower() == "true"
-    if not repo_dir and not empty_source:
+    no_repository = not repo_dir and (has_no_repository(r) or wiki_dir.exists())
+    if not repo_dir and not empty_source and not no_repository:
         raise RuntimeError(
             f"no local clone under {args.mirror_dir}/ - run 'ratatoskr checkout' first"
         )
@@ -347,7 +365,9 @@ def push_one(api, root, r, args, env):
     if project:
         url = project["ssh_url_to_repo"] if args.protocol == "ssh" else project["http_url_to_repo"]
 
-    if skip_code:
+    if no_repository:
+        print("   no repository on the source (wiki only) - no code to push")
+    elif skip_code:
         print("   code: target is not empty - skipped (use --update-existing to force-push)")
     elif empty_source:
         print("   source repo is empty - nothing to push")
@@ -356,7 +376,6 @@ def push_one(api, root, r, args, env):
     else:
         push_code(api, project, r, repo_dir, working_copy, url, args, env)
 
-    wiki_dir = Path(args.mirror_dir) / f"{src}.wiki.git"
     if args.wiki and wiki_dir.exists():
         if args.dry_run:
             print("   would push wiki")

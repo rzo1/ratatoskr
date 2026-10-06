@@ -31,6 +31,7 @@ FIELDS = [
     "visibility",
     "archived",
     "empty_repo",
+    "repository_access_level",
     "last_activity_at",
     "description",
 ]

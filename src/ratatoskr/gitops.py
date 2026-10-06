@@ -43,13 +43,23 @@ def ssh_env():
     }
 
 
+def git_error(stderr):
+    """The meaningful part of git's error output (not the generic hints after it)."""
+    lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+    errors = [
+        line
+        for line in lines
+        if line.lower().startswith(("error:", "fatal:", "remote: error", "remote: fatal"))
+    ]
+    return " / ".join(errors[:2]) if errors else (lines[-1] if lines else "(no output)")
+
+
 def run_git(args, cwd, env):
     res = subprocess.run(
         ["git", *args], cwd=cwd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL
     )
     if res.returncode != 0:
-        last_line = (res.stderr.strip().splitlines() or ["(no output)"])[-1]
-        raise RuntimeError(f"git {args[0]} failed: {last_line}")
+        raise RuntimeError(f"git {args[0]} failed: {git_error(res.stderr)}")
     return res.stdout
 
 
