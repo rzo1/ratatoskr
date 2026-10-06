@@ -74,3 +74,30 @@ def test_askpass_script_answers_prompts():
         assert ask("Password for 'https://alice@gl':") == "tok$en'"
     finally:
         os.unlink(script)
+
+
+def test_clone_status_line():
+    stages = {"grp/big": "LFS", "grp/other": "cloning"}
+    line = cli.clone_status(3, 10, stages, cli.time.monotonic() - 75)
+    assert line == "  3/10 done, 1:15 elapsed - grp/big (LFS), grp/other (cloning)"
+
+
+def test_checkout_one_tracks_and_clears_its_stage(tmp_path, source_repo, monkeypatch):
+    seen = []
+    real_clone_one = cli.clone_one
+
+    def clone_one(url, dest, working_copy, env):
+        seen.append(dict(stages))
+        return real_clone_one(url, dest, working_copy, env)
+
+    monkeypatch.setattr(cli, "clone_one", clone_one)
+    stages = {}
+    args = type("A", (), {"dest": tmp_path, "working_copy": False, "lfs": False, "wiki": False})
+    ok, _ = cli.checkout_one(
+        {"path_with_namespace": "g/r", "ssh_url_to_repo": str(source_repo)},
+        "ssh_url_to_repo",
+        args,
+        {},
+        stages,
+    )
+    assert ok and seen == [{"g/r": "cloning"}] and stages == {}

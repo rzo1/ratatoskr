@@ -18,7 +18,8 @@ import argparse
 import getpass
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -81,22 +82,37 @@ def open_source(args):
 # ---------------------------------------------------------------- checkout
 
 
-def checkout_one(r, url_key, args, env):
-    """Clone/update one repo with LFS objects and wiki; returns (ok, message)."""
+def checkout_one(r, url_key, args, env, stages=None):
+    """Clone/update one repo with LFS objects and wiki; returns (ok, message).
+
+    The current step is kept in ``stages[path]`` while running, for the progress line.
+    """
     path = r["path_with_namespace"]
+    stages = {} if stages is None else stages
+    try:
+        return _checkout_one(r, path, url_key, args, env, stages)
+    finally:
+        stages.pop(path, None)
+
+
+def _checkout_one(r, path, url_key, args, env, stages):
     root = Path(args.dest)
     dest = root / (path if args.working_copy else f"{path}.git")
+    stages[path] = "fetching" if dest.exists() else "cloning"
     action, res = clone_one(r[url_key], dest, args.working_copy, env)
     if res.returncode != 0:
         return False, f"FAILED   {path}\n    {last_line(res.stderr)}"
     extras = []
     try:
         if args.lfs:
+            stages[path] = "LFS"
             count = lfs_fetch(dest, env)
             if count is None:
                 extras.append("LFS skipped: git-lfs not installed")
             elif count:
                 extras.append(f"{count} LFS objects")
+        if args.wiki:
+            stages[path] = "wiki"
         if args.wiki and clone_wiki(r[url_key], root / f"{path}.wiki.git", env) != "none":
             extras.append("wiki")
     except RuntimeError as e:
@@ -113,18 +129,37 @@ def clone_all(repos, username, args):
         f"({'working copies' if args.working_copy else 'bare mirrors'}, {args.jobs} parallel)\n"
     )
     failed = []
+    stages = {}  # path -> current step of the running clones
+    started = time.monotonic()
+    done = 0
     try:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futures = {pool.submit(checkout_one, r, url_key, args, env): r for r in repos}
-            for i, fut in enumerate(as_completed(futures), 1):
-                ok, message = fut.result()
-                print(f"[{i}/{len(repos)}] {message}")
-                if not ok:
-                    failed.append(futures[fut]["path_with_namespace"])
+            futures = {pool.submit(checkout_one, r, url_key, args, env, stages): r for r in repos}
+            pending = set(futures)
+            while pending:
+                finished, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    done += 1
+                    ok, message = fut.result()
+                    progress.clear()
+                    print(f"[{done}/{len(repos)}] {message}")
+                    if not ok:
+                        failed.append(futures[fut]["path_with_namespace"])
+                if pending:
+                    progress.update(clone_status(done, len(repos), stages, started), transient=True)
     finally:
+        progress.clear()
         if askpass:
             os.unlink(askpass)
     return failed
+
+
+def clone_status(done, total, stages, started):
+    elapsed = int(time.monotonic() - started)
+    running = ", ".join(f"{path} ({step})" for path, step in list(stages.items()))
+    return f"  {done}/{total} done, {elapsed // 60}:{elapsed % 60:02d} elapsed" + (
+        f" - {running}" if running else ""
+    )
 
 
 def export_all(source, repos, args):
