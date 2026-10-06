@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
+from ratatoskr import progress
 from ratatoskr.source import SourceError
 
 KINDS = {"issues": "issues", "merge-requests": "merge_requests"}  # folder suffix -> API path
@@ -127,8 +128,9 @@ def activity_lines(notes):
 
 
 class ProjectExporter:
-    def __init__(self, source, row, out_root):
+    def __init__(self, source, row, out_root, label=None):
         self.source = source
+        self.label = label or row["path_with_namespace"]
         self.row = row
         self.pid = row["id"]
         self.base = Path(out_root) / row["path_with_namespace"]
@@ -148,15 +150,16 @@ class ProjectExporter:
             parts.append(f"{self.missing_attachments} attachments MISSING")
         return ", ".join(parts)
 
-    def _list(self, path, params=None):
+    def _list(self, path, params=None, on_page=None):
         try:
-            return list(self.source.paginate(path, params))
+            return list(self.source.paginate(path, params, on_page=on_page))
         except SourceError as e:
             if e.status in (403, 404):  # feature disabled for this project
                 return []
             raise
 
     def export_meta(self):
+        progress.update(f"{self.label}: labels and milestones ...")
         labels = self._list(f"/projects/{self.pid}/labels", {"include_ancestor_groups": "true"})
         milestones = self._list(f"/projects/{self.pid}/milestones", {"include_ancestors": "true"})
         meta = self.base.parent / f"{self.base.name}-meta.json"
@@ -170,10 +173,15 @@ class ProjectExporter:
         api_kind = KINDS[kind]
         folder = self.base.parent / f"{self.base.name}-{kind}"
         params = {"scope": "all", "state": "all", "order_by": "created_at", "sort": "asc"}
-        items = self._list(f"/projects/{self.pid}/{api_kind}", params)
+        progress.update(f"{self.label}: reading {kind} ...")
+        items = self._list(
+            f"/projects/{self.pid}/{api_kind}",
+            params,
+            on_page=lambda page, total: progress.update(f"{self.label}: reading {kind} ({total})"),
+        )
         index = load_index(folder)
         written = 0
-        for data in items:
+        for n, data in enumerate(items, 1):
             iid = str(data["iid"])
             entry = index.get(iid)
             stem = item_stem(data)
@@ -184,6 +192,7 @@ class ProjectExporter:
                 and (folder / f"{stem}.json").exists()
             ):
                 continue
+            progress.update(f"{self.label}: {kind} {n}/{len(items)} (#{iid})")
             notes = self._list(
                 f"/projects/{self.pid}/{api_kind}/{iid}/notes",
                 {"sort": "asc", "order_by": "created_at"},

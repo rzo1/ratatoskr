@@ -1,4 +1,5 @@
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from ratatoskr import source
@@ -94,3 +95,29 @@ def test_download_skips_html_and_errors(session):
     session.answers = {url: [Resp(200, headers={"content-type": "text/html"}), Resp(404)]}
     assert session.download(url) is None
     assert session.download(url) is None
+
+
+def test_closed_browser_stops_with_a_hint(session):
+    closed = PlaywrightError("Target page, context or browser has been closed")
+    session.answers = {f"{BASE}/things": [closed]}
+    with pytest.raises(SystemExit, match="browser window was closed"):
+        list(session.paginate("/things"))
+    assert session.sleeps == []
+
+
+def test_list_projects_shows_progress(capsys):
+    class Paged:
+        def paginate(self, path, params=None, on_page=None):
+            for page in (1, 2):
+                on_page(page, page * 100)
+                yield from (
+                    {"path_with_namespace": f"g/p{page}-{i}", "visibility": "private"}
+                    for i in range(100)
+                )
+
+    args = type("Args", (), {"scope": "all", "include_archived": False, "visibility": ["private"]})
+    assert len(source.list_projects(Paged(), args)) == 200
+    out = capsys.readouterr().out
+    assert "page 1: 100 projects so far" in out
+    assert "page 2: 200 projects so far" in out
+    assert "200 projects found" in out

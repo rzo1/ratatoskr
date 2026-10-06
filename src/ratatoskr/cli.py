@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from pathlib import Path
 
+from ratatoskr import progress
 from ratatoskr.exporter import ProjectExporter
 from ratatoskr.gitops import (
     askpass_env,
@@ -133,10 +134,13 @@ def export_all(source, repos, args):
     failed = []
     for i, r in enumerate(repos, 1):
         path = r["path_with_namespace"]
+        label = f"[{i}/{len(repos)}] {path}"
         try:
-            summary = ProjectExporter(source, r, args.dest).export(args.issues, args.mrs)
-            print(f"[{i}/{len(repos)}] {path}: {summary}")
+            summary = ProjectExporter(source, r, args.dest, label).export(args.issues, args.mrs)
+            progress.clear()
+            print(f"{label}: {summary}")
         except Exception as e:  # keep going, report at the end
+            progress.clear()
             print(f"[{i}/{len(repos)}] FAILED   {path}\n    {e}")
             failed.append(path)
     return failed

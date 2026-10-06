@@ -112,11 +112,13 @@ class FakeSource:
     def __exit__(self, *exc):
         pass
 
-    def paginate(self, path, params=None):
+    def paginate(self, path, params=None, on_page=None):
         self.calls.append(path)
         value = self.lists.get(path, [])
         if isinstance(value, Exception):
             raise value
+        if on_page:
+            on_page(1, len(value))
         yield from value
 
     def download(self, url):

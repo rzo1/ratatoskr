@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 
+from ratatoskr import progress
+
 FIELDS = [
     "id",
     "path_with_namespace",
@@ -43,6 +45,10 @@ ACCESS_LEVELS = {
 }
 
 RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+BROWSER_CLOSED = (
+    "\nThe browser window was closed, so the source session is gone. Run the command again; "
+    "what has been downloaded so far is kept and not fetched twice."
+)
 MAX_BACKOFF = 120
 
 
@@ -120,6 +126,10 @@ class SourceSession:
             if resp is not None and resp.ok:
                 self.user = resp.json()
                 print(f"Logged in as {self.user['username']} ({self.user.get('name')})")
+                print(
+                    "Keep the browser window open until Ratatoskr is done - "
+                    "all requests to the source use its session."
+                )
                 return self.user
             time.sleep(2)
         sys.exit(f"Not logged in after {self.login_timeout}s - giving up.")
@@ -137,6 +147,8 @@ class SourceSession:
             try:
                 resp = self._get(url, params)
             except PlaywrightError as e:
+                if "has been closed" in e.message:
+                    sys.exit(BROWSER_CLOSED)
                 resp, problem = None, e.message.splitlines()[0]
             else:
                 if resp.status == 401 and not relogged:
@@ -165,14 +177,22 @@ class SourceSession:
             raise SourceError(resp.status, f"GET {path} -> {resp.status}: {resp.text()[:300]}")
         return resp.json()
 
-    def paginate(self, path, params=None):
-        """Yield all items of a list endpoint, following the Link header."""
+    def paginate(self, path, params=None, on_page=None):
+        """Yield all items of a list endpoint, following the Link header.
+
+        ``on_page(page, total)`` is called after every page, e.g. to show progress.
+        """
         url, query = f"{self.api}{path}", {"per_page": 100, **(params or {})}
+        page = total = 0
         while url:
             resp = self._request(url, query)
             if not resp.ok:
                 raise SourceError(resp.status, f"GET {path} -> {resp.status}: {resp.text()[:300]}")
-            yield from resp.json()
+            items = resp.json()
+            page, total = page + 1, total + len(items)
+            if on_page:
+                on_page(page, total)
+            yield from items
             url, query = next_link(resp.headers.get("link", "")), None
 
     def download(self, url):
@@ -193,11 +213,17 @@ def list_projects(source, args):
     if not args.include_archived:
         params["archived"] = "false"
 
-    projects = []
-    for project in source.paginate("/projects", params):
-        projects.append(project)
-        if len(projects) % 100 == 0:
-            print(f"  {len(projects)} projects ...")
+    print("Reading the project list (100 per page) ...")
+    progress.update("  waiting for the first page ...")
+    projects = list(
+        source.paginate(
+            "/projects",
+            params,
+            on_page=lambda page, total: progress.update(f"  page {page}: {total} projects so far"),
+        )
+    )
+    progress.clear()
+    print(f"  {len(projects)} projects found")
     projects.sort(key=lambda pr: pr["path_with_namespace"].lower())
 
     total = len(projects)
