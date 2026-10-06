@@ -1,6 +1,7 @@
 """Git operations: clone/update local copies, push them, verify the result."""
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -44,6 +45,20 @@ def ssh_env():
     }
 
 
+def english(env):
+    """``env`` with git's messages in English, which progress and error parsing rely on.
+
+    Only the message language changes; LC_ALL is turned into LANG so it cannot override it.
+    """
+    env = dict(os.environ if env is None else env)
+    if env.get("LC_ALL"):
+        env.setdefault("LANG", env["LC_ALL"])
+        del env["LC_ALL"]
+    env["LC_MESSAGES"] = "C"
+    env["LANGUAGE"] = "C"
+    return env
+
+
 def git_error(stderr):
     """The meaningful part of git's error output (not the generic hints after it)."""
     lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
@@ -57,11 +72,66 @@ def git_error(stderr):
 
 def run_git(args, cwd, env):
     res = subprocess.run(
-        ["git", *args], cwd=cwd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        ["git", *args],
+        cwd=cwd,
+        env=english(env),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
     if res.returncode != 0:
         raise RuntimeError(f"git {args[0]} failed: {git_error(res.stderr)}")
     return res.stdout
+
+
+PROGRESS_RE = re.compile(
+    r"(?P<what>[A-Za-z ]+?(?:objects|LFS objects|deltas)):\s+(?P<pct>\d+)%"
+    r"(?:[^,]*,\s*(?P<size>[\d.]+ ?[KMGT]?i?B)(?:\s*\|\s*(?P<speed>[\d.]+ ?[KMGT]?i?B/s))?)?"
+)
+
+
+def short_progress(line):
+    """'Writing objects:  45% (2470/5487), 180.00 MiB | 5.20 MiB/s' -> 'writing 45%, ...'."""
+    m = PROGRESS_RE.search(line)
+    if not m:
+        return None
+    what = m["what"].strip().split()[0].lower()
+    text = f"{what} {m['pct']}%"
+    if m["size"]:
+        text += f", {m['size']}"
+    if m["speed"]:
+        text += f" at {m['speed']}"
+    return text
+
+
+def run_streaming(cmd, cwd, env, on_progress=None):
+    """Run a git command and pass its progress lines (split on CR/LF) to ``on_progress``.
+
+    Returns a CompletedProcess with the complete stderr, for error reporting.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=english(env),
+        stdin=subprocess.DEVNULL,  # never hang on an interactive prompt
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stderr, pending = [], b""
+    while chunk := proc.stderr.read1(4096):
+        stderr.append(chunk)
+        *lines, pending = re.split(rb"[\r\n]", pending + chunk)
+        for line in lines:
+            if on_progress and (text := short_progress(line.decode(errors="replace"))):
+                on_progress(text)
+    stdout = proc.stdout.read()
+    proc.wait()
+    return subprocess.CompletedProcess(
+        cmd,
+        proc.returncode,
+        stdout.decode(errors="replace"),
+        b"".join(stderr).decode(errors="replace"),
+    )
 
 
 def wiki_url(repo_url):
@@ -71,22 +141,17 @@ def wiki_url(repo_url):
 # ---------------------------------------------------------------- clone
 
 
-def clone_one(url, dest: Path, working_copy, env):
+def clone_one(url, dest: Path, working_copy, env, on_progress=None):
     if dest.exists():
-        cmd = (
-            ["git", "-C", str(dest), "fetch", "--all", "--prune"]
-            if working_copy
-            else ["git", "-C", str(dest), "remote", "update", "--prune"]
-        )
+        # a mirror's origin fetches +refs/*:refs/*, a working copy its remote branches
+        cmd = ["git", "-C", str(dest), "fetch", "--prune", "--progress", "origin"]
         action = "updated"
     else:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        cmd = ["git", "clone", *([] if working_copy else ["--mirror"]), url, str(dest)]
+        mirror = [] if working_copy else ["--mirror"]
+        cmd = ["git", "clone", "--progress", *mirror, url, str(dest)]
         action = "cloned"
-    res = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL
-    )  # never hang on an interactive prompt
-    return action, res
+    return action, run_streaming(cmd, None, env, on_progress)
 
 
 def clone_wiki(repo_url, dest: Path, env):
@@ -141,7 +206,7 @@ def remote_refs(url, repo, env):
     return {ref: sha for sha, ref in pairs if not ref.endswith("^{}")}
 
 
-def push_refs(url, repo, working_copy, env):
+def push_refs(url, repo, working_copy, env, on_progress=None):
     """Push all branches and tags; returns the {ref: sha} that were pushed."""
     refs = local_refs(repo, working_copy, env)
     refspecs = MIRROR_REFSPECS
@@ -151,7 +216,9 @@ def push_refs(url, repo, working_copy, env):
             for ref in refs
             if ref.startswith("refs/heads/")
         ] + [TAG_REFSPEC]
-    run_git(["push", url, *refspecs], repo, env)
+    res = run_streaming(["git", "push", "--progress", url, *refspecs], repo, env, on_progress)
+    if res.returncode != 0:
+        raise RuntimeError(f"git push failed: {git_error(res.stderr)}")
     return refs
 
 
@@ -249,7 +316,7 @@ def run_watched(args, cwd, env, watch_dir, stall_timeout, poll=2.0):
         proc = subprocess.Popen(
             ["git", *args],
             cwd=cwd,
-            env=env,
+            env=english(env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=err,
@@ -300,12 +367,14 @@ def lfs_fetch(repo, env, stall_timeout=120, skip_lfs_projects=False):
     return pointers, lfs_object_count(repo)
 
 
-def lfs_push(url, repo, env):
+def lfs_push(url, repo, env, on_progress=None):
     """Upload all local LFS objects to ``url``; returns their number (0 = nothing to do)."""
     count = lfs_object_count(repo)
     if not count:
         return 0
     if not has_git_lfs():
         raise RuntimeError(f"{count} LFS objects to push, but git-lfs is not installed")
-    run_git(["lfs", "push", "--all", url], repo, env)
+    res = run_streaming(["git", "lfs", "push", "--all", url], repo, env, on_progress)
+    if res.returncode != 0:
+        raise RuntimeError(f"git lfs push failed: {git_error(res.stderr)}")
     return count

@@ -106,8 +106,13 @@ def _checkout_one(r, path, url_key, args, env, stages):
     wiki_dest = root / f"{path}.wiki.git"
     if has_no_repository(r):
         return checkout_wiki_only(r, path, url_key, args, env, stages, None)
-    stages[path] = "fetching" if dest.exists() else "cloning"
-    action, res = clone_one(r[url_key], dest, args.working_copy, env)
+    step = "fetching" if dest.exists() else "cloning"
+    stages[path] = step
+
+    def on_progress(text):
+        stages[path] = f"{step}: {text}"
+
+    action, res = clone_one(r[url_key], dest, args.working_copy, env, on_progress)
     if res.returncode != 0:
         # projects with the repository feature turned off can still have a wiki
         return checkout_wiki_only(r, path, url_key, args, env, stages, git_error(res.stderr))
@@ -370,13 +375,26 @@ def ensure_project(api, r, full, args):
     return project, False
 
 
+def show_progress(text):
+    progress.update(f"   {text}", transient=True)
+
+
 def push_code(api, project, r, repo_dir, working_copy, url, args, env):
     if args.lfs:
         # before the git push: GitLab rejects pushes whose LFS objects it does not have
-        count = lfs_push(url, repo_dir, env)
+        try:
+            count = lfs_push(url, repo_dir, env, show_progress)
+        finally:
+            progress.clear()
         if count:
             print(f"   pushed {count} LFS objects")
-    refs = push_refs(url, repo_dir, working_copy, env)
+    size = sum(f.stat().st_size for f in Path(repo_dir).rglob("objects/pack/*.pack"))
+    if size > 50 * 2**20:
+        print(f"   pushing {size / 2**20:.0f} MiB of git data, this can take a while ...")
+    try:
+        refs = push_refs(url, repo_dir, working_copy, env, show_progress)
+    finally:
+        progress.clear()
     n_branches = sum(ref.startswith("refs/heads/") for ref in refs)
     print(f"   pushed {n_branches} branches, {len(refs) - n_branches} tags")
 

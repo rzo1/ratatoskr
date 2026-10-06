@@ -86,9 +86,9 @@ def test_checkout_one_tracks_and_clears_its_stage(tmp_path, source_repo, monkeyp
     seen = []
     real_clone_one = cli.clone_one
 
-    def clone_one(url, dest, working_copy, env):
+    def clone_one(url, dest, working_copy, env, on_progress=None):
         seen.append(dict(stages))
-        return real_clone_one(url, dest, working_copy, env)
+        return real_clone_one(url, dest, working_copy, env, on_progress)
 
     monkeypatch.setattr(cli, "clone_one", clone_one)
     stages = {}

@@ -215,7 +215,7 @@ def test_push_archives_after_import(exported, gitlab, run_cli, write_csv, source
 def test_lfs_objects_are_pushed_before_the_code(exported, gitlab, run_cli, monkeypatch, capsys):
     csv_path, mirrors = exported
     calls = []
-    monkeypatch.setattr(cli, "lfs_push", lambda url, repo, env: calls.append("lfs") or 3)
+    monkeypatch.setattr(cli, "lfs_push", lambda url, repo, env, cb: calls.append("lfs") or 3)
     real_push_refs = cli.push_refs
 
     def push_refs(*args):
