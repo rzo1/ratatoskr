@@ -121,3 +121,47 @@ def test_step_aliases(run_cli, monkeypatch):
     run_cli("download", "--from-csv", "x.csv", "--no-issues", "--no-mrs")
     run_cli("migrate", "--target-url", "t.example.org", "--group", "g")
     assert calls == [("checkout", "checkout"), ("push", "push")]
+
+
+DOWNLOAD = ("download", "--from-csv", "x.csv", "--no-issues", "--no-mrs")
+
+
+@pytest.fixture
+def no_git_lfs(monkeypatch):
+    monkeypatch.setattr(cli, "has_git_lfs", lambda: False)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+    calls = []
+    monkeypatch.setattr(cli, "checkout", lambda args: calls.append(args.lfs) or 0)
+    return calls
+
+
+def test_missing_git_stops_before_anything(run_cli, monkeypatch):
+    monkeypatch.setattr(cli, "has_git", lambda: False)
+    monkeypatch.setattr(cli, "checkout", lambda args: pytest.fail("must not start"))
+    with pytest.raises(SystemExit, match="git is not installed"):
+        run_cli(*DOWNLOAD)
+
+
+def test_missing_git_lfs_continue_without(run_cli, answers, no_git_lfs, capsys):
+    answers("x", "c")
+    assert run_cli(*DOWNLOAD) == 0
+    assert no_git_lfs == [False]  # LFS switched off for this run
+    assert "git-lfs is not installed" in capsys.readouterr().out
+
+
+def test_missing_git_lfs_abort_is_default(run_cli, answers, no_git_lfs):
+    answers("")
+    with pytest.raises(SystemExit, match="Aborted"):
+        run_cli(*DOWNLOAD)
+    assert no_git_lfs == []
+
+
+def test_missing_git_lfs_without_terminal_aborts(run_cli, no_git_lfs, monkeypatch):
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False, raising=False)
+    with pytest.raises(SystemExit, match="--no-lfs"):
+        run_cli(*DOWNLOAD)
+
+
+def test_no_lfs_needs_no_git_lfs(run_cli, no_git_lfs):
+    assert run_cli(*DOWNLOAD, "--no-lfs") == 0
+    assert no_git_lfs == [False]

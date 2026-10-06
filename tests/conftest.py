@@ -65,6 +65,12 @@ def write_csv(tmp_path):
     return _write
 
 
+@pytest.fixture(autouse=True)
+def tools_installed(monkeypatch):
+    """Tests run without git-lfs; pretend it is there unless a test says otherwise."""
+    monkeypatch.setattr(cli, "has_git_lfs", lambda: True)
+
+
 @pytest.fixture
 def run_cli(monkeypatch):
     def _run(*argv):

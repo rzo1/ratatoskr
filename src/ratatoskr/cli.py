@@ -30,6 +30,9 @@ from ratatoskr.gitops import (
     askpass_env,
     clone_one,
     clone_wiki,
+    has_git,
+    has_git_lfs,
+    install_hint,
     lfs_fetch,
     lfs_push,
     local_repo,
@@ -611,10 +614,34 @@ def build_parser():
     return ap
 
 
+def check_tools(args):
+    """Make sure git (and git-lfs, if LFS is wanted) are installed before anything starts."""
+    if not has_git():
+        sys.exit(f"git is not installed. Install it first:\n  {install_hint('git')}")
+    if not args.lfs or has_git_lfs():
+        return
+    print(
+        "git-lfs is not installed, so LFS files cannot be "
+        + ("downloaded." if args.mode == "checkout" else "pushed.")
+        + f"\nInstall it with:\n  {install_hint('git-lfs')}\n"
+    )
+    if not sys.stdin.isatty():
+        sys.exit("Aborted. Install git-lfs or run with --no-lfs.")
+    while True:
+        answer = input("[c]ontinue without LFS or [a]bort? [a] ").strip().lower() or "a"
+        if answer in ("c", "continue"):
+            args.lfs = False
+            return
+        if answer in ("a", "abort"):
+            sys.exit("Aborted. Install git-lfs, or run with --no-lfs to skip LFS objects.")
+
+
 def main():
     ap = build_parser()
     args = ap.parse_args()
     args.mode = {"download": "checkout", "migrate": "push"}.get(args.mode, args.mode)
+    if args.mode in ("checkout", "push"):
+        check_tools(args)
 
     if args.mode == "push":
         if not args.target_url:

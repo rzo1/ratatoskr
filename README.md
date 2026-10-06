@@ -62,7 +62,9 @@ check it, and migrate later — even after the source has been switched off.
 ## Requirements
 
 - Python >= 3.14 and [uv](https://docs.astral.sh/uv/)
-- `git` on `PATH`, and `git-lfs` if your repos use LFS
+- `git` on `PATH`, and `git-lfs` if your repos use LFS. `checkout` and `push`
+  check for both before they start; without `git-lfs` they ask whether to
+  continue without LFS (or pass `--no-lfs`)
 - Source: an account you can log in with in a browser, plus an SSH key
   registered there (or a PAT with `read_repository` for HTTPS clones)
 - Target: a PAT with the `api` scope and permission to create subgroups and

@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -177,6 +178,18 @@ def push_wiki(url, wiki_dir, env):
 
 def has_git_lfs():
     return shutil.which("git-lfs") is not None
+
+
+def has_git():
+    return shutil.which("git") is not None
+
+
+def install_hint(package):
+    if sys.platform == "darwin":
+        return f"brew install {package}"
+    if sys.platform == "win32":
+        return f"winget install {'Git.Git' if package == 'git' else 'GitHub.GitLFS'}"
+    return f"sudo apt install {package}   (Fedora: sudo dnf install {package})"
 
 
 def lfs_object_count(repo):
