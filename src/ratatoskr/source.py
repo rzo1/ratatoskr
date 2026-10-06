@@ -212,8 +212,12 @@ def list_projects(source, args):
         params["owned"] = "true"
     if not args.include_archived:
         params["archived"] = "false"
+    wanted = sorted(set(args.visibility))
+    if len(wanted) == 1:
+        # the API filters by one visibility only; this skips e.g. all public/internal pages
+        params["visibility"] = wanted[0]
 
-    print("Reading the project list (100 per page) ...")
+    print(f"Reading the {'/'.join(wanted)} projects (100 per page) ...")
     progress.update("  waiting for the first page ...")
     projects = list(
         source.paginate(
@@ -227,10 +231,9 @@ def list_projects(source, args):
     projects.sort(key=lambda pr: pr["path_with_namespace"].lower())
 
     total = len(projects)
-    projects = [pr for pr in projects if pr.get("visibility") in args.visibility]
+    projects = [pr for pr in projects if pr.get("visibility") in wanted]
     if len(projects) < total:
-        wanted = "/".join(args.visibility)
-        print(f"Skipped {total - len(projects)} projects not matching visibility {wanted}")
+        print(f"Skipped {total - len(projects)} projects not matching {'/'.join(wanted)}")
     return projects
 
 

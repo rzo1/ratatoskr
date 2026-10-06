@@ -121,3 +121,31 @@ def test_list_projects_shows_progress(capsys):
     assert "page 1: 100 projects so far" in out
     assert "page 2: 200 projects so far" in out
     assert "200 projects found" in out
+
+
+@pytest.mark.parametrize(
+    ("visibility", "api_filter", "kept"),
+    [
+        (["private"], "private", ["g/a"]),  # default: only private pages are requested
+        (["private", "internal"], None, ["g/a", "g/b"]),
+        (["private", "internal", "public"], None, ["g/a", "g/b", "g/c"]),
+    ],
+)
+def test_list_projects_visibility_filter(visibility, api_filter, kept):
+    seen = {}
+
+    class Paged:
+        def paginate(self, path, params=None, on_page=None):
+            seen.update(params)
+            yield from (
+                {"path_with_namespace": f"g/{name}", "visibility": vis}
+                for name, vis in (("a", "private"), ("b", "internal"), ("c", "public"))
+                if api_filter is None or vis == api_filter
+            )
+
+    args = type("Args", (), {"scope": "membership", "include_archived": False})()
+    args.visibility = visibility
+    projects = source.list_projects(Paged(), args)
+    assert seen.get("visibility") == api_filter
+    assert seen["membership"] == "true" and seen["archived"] == "false"
+    assert [p["path_with_namespace"] for p in projects] == kept
