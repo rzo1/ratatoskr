@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv / virtualenv
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Project
+.browser-profile/
+mirrors/
+repos.csv
+repos.json
+repos.txt
+.DS_Store
