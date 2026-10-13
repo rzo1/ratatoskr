@@ -7,6 +7,8 @@ session expires during a long run, you are asked to log in again in the same win
 
 The source may be slow: every request gets a generous timeout, and timeouts, connection
 errors, 429 and 5xx answers are retried with exponential backoff (honouring Retry-After).
+To spare the source, requests can be paced (``max_rate`` per second), and when GitLab's
+RateLimit-* headers show that the quota is almost used up, we wait for its reset.
 """
 
 import csv
@@ -51,6 +53,7 @@ BROWSER_CLOSED = (
     "what has been downloaded so far is kept and not fetched twice."
 )
 MAX_BACKOFF = 120
+LOW_QUOTA = 0.05  # pause when less than this share of the source's rate limit is left
 
 
 class SourceError(Exception):
@@ -87,7 +90,13 @@ class SourceSession:
     """Browser context with an SSO session; API calls and downloads reuse its cookies."""
 
     def __init__(
-        self, base_url, profile_dir=".browser-profile", login_timeout=600, timeout=120, retries=5
+        self,
+        base_url,
+        profile_dir=".browser-profile",
+        login_timeout=600,
+        timeout=120,
+        retries=5,
+        max_rate=None,
     ):
         self.base = with_scheme(base_url)
         self.api = f"{self.base}/api/v4"
@@ -95,6 +104,8 @@ class SourceSession:
         self.login_timeout = login_timeout
         self.timeout_ms = timeout * 1000
         self.retries = retries
+        self.min_interval = 1 / max_rate if max_rate else 0.0
+        self._last_request = None
         self.user = None
 
     def __enter__(self):
@@ -136,9 +147,40 @@ class SourceSession:
         sys.exit(f"Not logged in after {self.login_timeout}s - giving up.")
 
     def _get(self, url, params=None):
-        return self.ctx.request.get(
+        self._pace()
+        resp = self.ctx.request.get(
             url, params=params, fail_on_status_code=False, timeout=self.timeout_ms
         )
+        self._respect_quota(resp)
+        return resp
+
+    def _pace(self):
+        """Keep at most ``max_rate`` requests per second."""
+        if not self.min_interval:
+            return
+        if self._last_request is not None:
+            wait = self._last_request + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+        self._last_request = time.monotonic()
+
+    def _respect_quota(self, resp):
+        """Wait for the reset when GitLab says the rate limit is almost used up."""
+        headers = resp.headers
+        remaining = headers.get("ratelimit-remaining", "")
+        limit = headers.get("ratelimit-limit", "")
+        reset = headers.get("ratelimit-reset", "")
+        if not (remaining.isdigit() and limit.isdigit() and reset.isdigit()):
+            return
+        if int(remaining) > int(limit) * LOW_QUOTA:
+            return
+        delay = min(max(int(reset) - int(time.time()), 1), MAX_BACKOFF)
+        progress.clear()
+        print(
+            f"  source rate limit almost used up ({remaining} of {limit} requests left), "
+            f"pausing {delay}s ..."
+        )
+        time.sleep(delay)
 
     def _request(self, url, params=None):
         """GET with retries for slow/overloaded servers and re-login on an expired session."""

@@ -9,7 +9,7 @@
 
 Move your projects from one GitLab to another — even when the source only lets
 you in through a **single sign-on (SSO) login**, is **read-only**, and neither
-API tokens nor GitLab's own project export are available. Ratatoskr opens a
+API tokens, SSH keys nor GitLab's own project export are available. Ratatoskr opens a
 real browser for you to log in and reads everything through that session:
 
 - **git**: all branches and tags, Git LFS objects, the wiki
@@ -66,7 +66,9 @@ check it, and migrate later — even after the source has been switched off.
   check for both before they start; without `git-lfs` they ask whether to
   continue without LFS (or pass `--no-lfs`)
 - Source: an account you can log in with in a browser, plus an SSH key
-  registered there (or a PAT with `read_repository` for HTTPS clones)
+  registered there (or a PAT with `read_repository` for HTTPS clones). Without
+  either, `--protocol api` rebuilds the repos from the REST API (see
+  [Without git access](#without-git-access---protocol-api))
 - Target: a PAT with the `api` scope and permission to create subgroups and
   projects in the target group. To keep issue numbers and dates, you need to
   be **owner** of the target group (or admin)
@@ -118,6 +120,7 @@ kept in `.browser-profile/`, so later runs usually skip the login.
 | `--login-timeout SECONDS`    | How long to wait for the SSO login (default: 600)                                |
 | `--source-timeout SECONDS`   | Timeout per request to the source (default: 120)                                 |
 | `--retries N`                | Retries for timeouts, 429 and 5xx answers of the source (default: 5)             |
+| `--max-rate PER_SECOND`      | Requests per second to the source (default: unlimited, 5 with `--protocol api`)  |
 | `--profile-dir DIR`          | Browser profile directory (default: `.browser-profile`)                          |
 
 `repos.csv` is your migration plan. Set `migrate` to `no` for repos you want
@@ -156,8 +159,9 @@ ratatoskr checkout --from-csv repos.csv                              # your edit
 ratatoskr checkout --from-csv repos.csv --no-issues --no-mrs         # git only, no browser
 ```
 
-You are asked whether to clone via **SSH** (your existing key) or **HTTPS**
-(username + token, entered hidden). For each repo you get:
+You are asked whether to clone via **SSH** (your existing key), **HTTPS**
+(username + token, entered hidden) or the **API** (browser session only, see
+below). For each repo you get:
 
 ```
 mirrors/group/subgroup/
@@ -179,7 +183,7 @@ needs the browser session, so the login window opens unless you pass
 | Option                       | Description                                                           |
 |------------------------------|-----------------------------------------------------------------------|
 | `--from-csv CSV`             | Use the rows with `migrate=yes` instead of listing again              |
-| `--protocol ssh\|https`      | Don't ask for the protocol                                            |
+| `--protocol ssh\|https\|api` | Don't ask for the protocol (alias: `--transport`)                     |
 | `--dest DIR`                 | Target directory (default: `mirrors`)                                 |
 | `--working-copy`             | Normal clones with a checked-out branch instead of bare mirrors       |
 | `-j N`, `--jobs N`           | Parallel clones (default: 4)                                          |
@@ -191,6 +195,40 @@ needs the browser session, so the login window opens unless you pass
 | `--no-mrs`                   | Don't export merge requests                                           |
 
 All `list` options are available as well.
+
+### Without git access (`--protocol api`)
+
+If you have neither an SSH key nor a token on the source (e.g. it is read-only,
+so you cannot add one), git itself cannot be used: GitLab does not accept the
+browser session for git. `--protocol api` (alias `--transport api`) rebuilds
+every repository from the REST API instead, with the browser session alone:
+
+- commits, directories and files are read one by one and written into a bare
+  mirror, all branches and tags included; every object is checked against the
+  SHA the source reports, so the result is **identical to a real clone**,
+- commits that cannot be rebuilt exactly — mainly **signed commits**, whose
+  signature the API does not return — are written without it; they and every
+  commit built on them get new SHAs. Annotated tags whose tagger differs from
+  the commit's author/committer get new SHAs too. Their content is complete;
+  the affected projects are listed in a warning at the end,
+- the **wiki** becomes a single snapshot commit of its current pages (no
+  history, no attachments); later runs add a commit when pages changed,
+- **LFS** files cannot be downloaded: projects using LFS are marked and
+  skipped by `push`, as described above,
+- the source is hit hard — one request per commit, changed directory and new
+  file, i.e. thousands per repo. Requests are therefore paced at **5 per
+  second** (change with `--max-rate`), retried with backoff, and paused when
+  GitLab's `RateLimit-*` headers show that the quota is almost used up.
+  Repos are rebuilt one after another (`--jobs` does not apply).
+
+Running it again only fetches what is new; an interrupted run continues where
+it stopped. `push` works as with any other clone. If git access becomes possible
+later, a `checkout` via SSH or HTTPS fetches the real history into the same
+mirror (including the original signed commits).
+
+```bash
+ratatoskr checkout --from-csv repos.csv --protocol api --max-rate 2
+```
 
 ### 3. Push (migrate)
 
