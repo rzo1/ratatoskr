@@ -149,3 +149,48 @@ def test_list_projects_visibility_filter(visibility, api_filter, kept):
     assert seen.get("visibility") == api_filter
     assert seen["membership"] == "true" and seen["archived"] == "false"
     assert [p["path_with_namespace"] for p in projects] == kept
+
+
+def test_requests_are_paced(session, monkeypatch):
+    session.min_interval = 0.5
+    clock = iter([10.0, 10.2, 10.5, 11.5, 11.5])
+    monkeypatch.setattr(source.time, "monotonic", lambda: next(clock))
+    session.answers = {f"{BASE}/x": [Resp(200, 1), Resp(200, 2), Resp(200, 3)]}
+    assert [session.get("/x") for _ in range(3)] == [1, 2, 3]
+    assert session.sleeps == [pytest.approx(0.3)]  # only the second request came too early
+
+
+def test_unpaced_by_default(session):
+    session.answers = {f"{BASE}/x": [Resp(200, 1), Resp(200, 2)]}
+    session.get("/x"), session.get("/x")
+    assert session.sleeps == []
+
+
+def test_pauses_when_the_rate_limit_is_almost_used_up(session, monkeypatch, capsys):
+    monkeypatch.setattr(source.time, "time", lambda: 1000)
+    quota = {"ratelimit-limit": "600", "ratelimit-reset": "1030"}
+    session.answers = {
+        f"{BASE}/x": [
+            Resp(200, 1, {**quota, "ratelimit-remaining": "100"}),
+            Resp(200, 2, {**quota, "ratelimit-remaining": "30"}),
+        ]
+    }
+    assert session.get("/x") == 1 and session.sleeps == []
+    assert session.get("/x") == 2 and session.sleeps == [30]
+    assert "30 of 600 requests left), pausing 30s" in capsys.readouterr().out
+
+
+def test_max_rate_option(monkeypatch):
+    from ratatoskr import cli
+
+    made = []
+    monkeypatch.setattr(cli, "SourceSession", lambda *a: made.append(a[-1]))
+    args = cli.build_parser().parse_args(["checkout", "--source-url", "s"])
+    cli.open_source(args)
+    args.protocol = "api"
+    cli.open_source(args)
+    args.max_rate = 0
+    cli.open_source(args)
+    args.max_rate = 2
+    cli.open_source(args)
+    assert made == [None, cli.API_DEFAULT_RATE, None, 2]

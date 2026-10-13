@@ -141,8 +141,19 @@ def wiki_url(repo_url):
 # ---------------------------------------------------------------- clone
 
 
+API_REMAP_FILE = "ratatoskr-api-remap"  # written by apiclone for repos built via the API
+
+
 def clone_one(url, dest: Path, working_copy, env, on_progress=None):
     if dest.exists():
+        has_origin = subprocess.run(
+            ["git", "-C", str(dest), "config", "remote.origin.url"],
+            capture_output=True,
+            env=english(env),
+        )
+        if has_origin.returncode != 0:  # built via --protocol api: from now on via git
+            mirror = [] if working_copy else ["--mirror=fetch"]
+            run_git(["remote", "add", *mirror, "origin", url], dest, env)
         # a mirror's origin fetches +refs/*:refs/*, a working copy its remote branches
         cmd = ["git", "-C", str(dest), "fetch", "--prune", "--progress", "origin"]
         action = "updated"
@@ -151,7 +162,10 @@ def clone_one(url, dest: Path, working_copy, env, on_progress=None):
         mirror = [] if working_copy else ["--mirror"]
         cmd = ["git", "clone", "--progress", *mirror, url, str(dest)]
         action = "cloned"
-    return action, run_streaming(cmd, None, env, on_progress)
+    res = run_streaming(cmd, None, env, on_progress)
+    if res.returncode == 0:  # the real objects are here now, no rewritten SHAs left
+        (git_dir(dest) / API_REMAP_FILE).unlink(missing_ok=True)
+    return action, res
 
 
 def clone_wiki(repo_url, dest: Path, env):

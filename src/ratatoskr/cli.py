@@ -4,6 +4,7 @@ Modes:
   ratatoskr list       log in via SSO in a browser window, write repos.{json,csv,txt}
   ratatoskr checkout   step 1 (alias: download): same listing (or --from-csv), then clone
                       every repo (all branches, tags, LFS objects, wiki) via SSH or HTTPS
+                      - or rebuild it via the REST API if git access is impossible -
                       and export issues, merge requests, labels and milestones
   ratatoskr push       step 2 (alias: migrate): create the projects (and subgroups) under a
                       group on the target GitLab, push everything there and recreate
@@ -24,6 +25,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from ratatoskr import progress
+from ratatoskr.apiclone import ApiCloner, hammer_warning, inexact_summary, snapshot_wiki
 from ratatoskr.excludes import Excludes
 from ratatoskr.exporter import ProjectExporter
 from ratatoskr.gitops import (
@@ -35,12 +37,14 @@ from ratatoskr.gitops import (
     has_git_lfs,
     install_hint,
     lfs_fetch,
+    lfs_pointer_count,
     lfs_problem,
     lfs_push,
     local_repo,
     prune_refs,
     push_refs,
     push_wiki,
+    set_lfs_problem,
     ssh_env,
     verify_refs,
     wiki_url,
@@ -56,7 +60,7 @@ from ratatoskr.source import (
 from ratatoskr.target import TargetApi, enc
 
 
-def ask_protocol(question, default=None):
+def ask_protocol(question, default=None, api=False):
     suffix = f" [{default[0]}]" if default else ""
     while True:
         answer = input(f"{question}{suffix} ").strip().lower() or (default or "")
@@ -64,6 +68,8 @@ def ask_protocol(question, default=None):
             return "ssh"
         if answer in ("h", "http", "https"):
             return "https"
+        if api and answer in ("a", "api"):
+            return "api"
 
 
 def https_env(username):
@@ -74,9 +80,20 @@ def https_env(username):
     return askpass_env(user, getpass.getpass("Token: "))
 
 
+API_DEFAULT_RATE = 5.0  # requests per second for --protocol api, unless --max-rate is given
+
+
 def open_source(args):
+    max_rate = args.max_rate
+    if max_rate is None and getattr(args, "protocol", None) == "api":
+        max_rate = API_DEFAULT_RATE
     return SourceSession(
-        args.source_url, args.profile_dir, args.login_timeout, args.source_timeout, args.retries
+        args.source_url,
+        args.profile_dir,
+        args.login_timeout,
+        args.source_timeout,
+        args.retries,
+        max_rate or None,
     )
 
 
@@ -147,8 +164,11 @@ def checkout_wiki_only(r, path, url_key, args, env, stages, clone_error):
     return False, f"FAILED   {path}\n    {clone_error}"
 
 
-def clone_all(repos, username, args):
-    protocol = args.protocol or ask_protocol("Clone via [s]sh or [h]ttps?")
+def clone_all(repos, source, args):
+    protocol = args.protocol
+    if protocol == "api":
+        return api_clone_all(source, repos, args)
+    username = source.user["username"] if source else None
     env, askpass = https_env(username) if protocol == "https" else (ssh_env(), None)
     url_key = "ssh_url_to_repo" if protocol == "ssh" else "http_url_to_repo"
     print(
@@ -179,6 +199,79 @@ def clone_all(repos, username, args):
         if askpass:
             os.unlink(askpass)
     return failed
+
+
+def api_clone_all(source, repos, args):
+    """Rebuild every repo via the REST API, one after another (the browser is single-threaded)."""
+    print(hammer_warning(len(repos), source.min_interval and 1 / source.min_interval))
+    print(f"Rebuilding {len(repos)} repos via the API into {args.dest}/ (bare mirrors)\n")
+    failed = []
+    for i, r in enumerate(repos, 1):
+        path = r["path_with_namespace"]
+
+        def on_progress(text, path=path, i=i):
+            progress.update(f"  [{i}/{len(repos)}] {path}: {text}", transient=True)
+
+        try:
+            ok, message = api_checkout_one(source, r, args, on_progress)
+        except Exception as e:  # keep going, report at the end
+            ok, message = False, f"FAILED   {path}\n    {e}"
+        progress.clear()
+        print(f"[{i}/{len(repos)}] {message}")
+        if not ok:
+            failed.append(path)
+    return failed
+
+
+def api_checkout_one(source, r, args, on_progress):
+    path = r["path_with_namespace"]
+    root = Path(args.dest)
+    project_id = r.get("id") or path
+    if has_no_repository(r):
+        if args.wiki and snapshot_wiki(source, project_id, root / f"{path}.wiki.git"):
+            return True, f"wiki     {path} (the project has no repository, only a wiki)"
+        return True, f"skipped  {path} (repository disabled on the source, no wiki)"
+
+    dest = root / f"{path}.git"
+    cloner = ApiCloner(source, project_id, dest, on_progress=on_progress)
+    action = cloner.run(r.get("default_branch"))
+    extras = [f"{cloner.stats['requests']} requests"]
+    if inexact_summary(dest):
+        extras.append("NEW SHAs - see the warning at the end")
+    if cloner.skipped_tags:
+        extras.append(f"skipped tags not pointing to a commit: {', '.join(cloner.skipped_tags)}")
+    if args.lfs and has_git_lfs():
+        pointers = lfs_pointer_count(dest)
+        problem = None
+        if pointers:
+            problem = (
+                f"{pointers} LFS files not downloaded: LFS needs git access, not --protocol api"
+            )
+            extras.append("LFS PROBLEM - see the warning at the end")
+        set_lfs_problem(dest, problem)
+    if args.wiki:
+        on_progress("wiki")
+        try:
+            if pages := snapshot_wiki(source, project_id, root / f"{path}.wiki.git"):
+                extras.append(f"wiki snapshot: {pages} pages")
+        except Exception as e:  # the repository is fine, only the wiki is missing
+            return False, f"FAILED   {path} (repository {action}, wiki failed)\n    {e}"
+    return True, f"{action:8} {path} ({', '.join(extras)})"
+
+
+def warn_inexact(repos, mirror_dir):
+    items = []
+    for r in repos:
+        repo_dir, _ = local_repo(mirror_dir, r["path_with_namespace"])
+        if repo_dir and (summary := inexact_summary(repo_dir)):
+            items.append((r["path_with_namespace"], summary))
+    if items:
+        hints = [
+            "Their content is complete, but these commits/tags (and every commit built on",
+            "top of them) have different SHAs than on the source - usually signed commits,",
+            "whose signature the API does not return. Links to these SHAs will not resolve.",
+        ]
+        warning_box(f"{len(items)} project(s) with rewritten history", items, hints)
 
 
 def lfs_problems(repos, mirror_dir):
@@ -251,7 +344,15 @@ def export_all(source, repos, args):
 def checkout(args):
     export = args.issues or args.mrs
     excludes = Excludes.from_args(args)
-    if args.from_csv and not export:
+    if not args.protocol:  # before the login, so the browser is only opened when needed
+        args.protocol = ask_protocol(
+            "Clone via [s]sh, [h]ttps or [a]pi (browser session only, slow)?", api=True
+        )
+    if args.protocol == "api" and args.working_copy:
+        sys.exit("--working-copy is not possible with --protocol api (it builds bare mirrors).")
+    if args.protocol == "api" and not args.source_url:
+        sys.exit("--source-url (or RATATOSKR_SOURCE_URL) is required for --protocol api.")
+    if args.from_csv and not export and args.protocol != "api":
         session = nullcontext(None)
     else:
         session = open_source(args)
@@ -266,7 +367,7 @@ def checkout(args):
         if not repos:
             print("Nothing to clone.")
             return 0
-        failed = clone_all(repos, source.user["username"] if source else None, args)
+        failed = clone_all(repos, source, args)
         if export:
             failed += [p for p in export_all(source, repos, args) if p not in failed]
 
@@ -277,6 +378,7 @@ def checkout(args):
     )
     for path in failed:
         print("  failed:", path)
+    warn_inexact(repos, args.dest)
     warn_lfs_problems(problems, "download")
     return 1 if failed or problems else 0
 
@@ -578,6 +680,13 @@ def add_list_args(p):
         help="retries for timeouts, 429 and 5xx answers of the source, "
         "with growing pauses (default: 5)",
     )
+    p.add_argument(
+        "--max-rate",
+        type=float,
+        metavar="PER_SECOND",
+        help="at most this many requests per second to the source, to spare it "
+        f"(default: unlimited, {API_DEFAULT_RATE:g} with --protocol api; 0 = unlimited)",
+    )
     p.add_argument("--profile-dir", default=".browser-profile")
     p.add_argument("--out-dir", default=".", help="where repos.{json,csv,txt} are written")
     add_exclude_args(p)
@@ -620,7 +729,14 @@ def build_parser():
         metavar="CSV",
         help="use the rows with migrate=yes from this CSV instead of listing again",
     )
-    p_co.add_argument("--protocol", choices=["ssh", "https"], help="skip the interactive question")
+    p_co.add_argument(
+        "--protocol",
+        "--transport",
+        choices=["ssh", "https", "api"],
+        help="how to get the git data (asked if omitted): ssh, https, or api = rebuild "
+        "every repo from the REST API with the browser session alone - for when SSH and "
+        "HTTPS are impossible; slow and heavy on the source, no LFS, wiki without history",
+    )
     p_co.add_argument("--dest", default="mirrors", help="clone target directory (default: mirrors)")
     p_co.add_argument(
         "--working-copy",
@@ -768,7 +884,13 @@ def main():
             ap.error("--target-url (or RATATOSKR_TARGET_URL) is required")
         return push(args)
 
-    needs_browser = args.mode == "list" or not args.from_csv or args.issues or args.mrs
+    needs_browser = (
+        args.mode == "list"
+        or not args.from_csv
+        or args.issues
+        or args.mrs
+        or args.protocol == "api"
+    )
     if needs_browser and not args.source_url:
         ap.error("--source-url (or RATATOSKR_SOURCE_URL) is required")
 
