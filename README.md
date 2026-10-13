@@ -35,7 +35,7 @@ local export uses Freki's format.
 │ browser login        │ ─ list ──────> │ repos.csv (edit it!) │                │ subgroups + projects │
 │ REST API via session │                │ <dest>/<group>/      │                │ branches, tags, LFS  │
 │ issues, MRs, uploads │                │   x.git              │                │ wiki                 │
-│ git over SSH/HTTPS   │ ─ download ──> │   x.wiki.git         │ ─ migrate ───> │ labels, milestones   │
+│ git: SSH/HTTPS/API   │ ─ download ──> │   x.wiki.git         │ ─ migrate ───> │ labels, milestones   │
 │                      │                │   x-issues/          │                │ issues + comments    │
 │                      │                │   x-merge-requests/  │                │ MRs as wiki pages    │
 │                      │                │   x-meta.json        │                │                      │
@@ -48,7 +48,8 @@ local export uses Freki's format.
 2. **`checkout`** — does the same listing (or reads your edited `repos.csv`),
    asks for **SSH or HTTPS**, clones every repo as a bare mirror with its LFS
    objects and wiki, and exports issues, merge requests, labels, milestones
-   and attachments.
+   and attachments. Without any git access, **API** rebuilds the repos from
+   the REST API instead (`--protocol api`).
 3. **`push`** — asks for a **PAT** for the target and which part of the source
    group path to strip, creates missing subgroups and projects, pushes code,
    LFS and wiki, verifies all refs, and recreates labels, milestones, issues

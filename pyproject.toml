@@ -1,6 +1,6 @@
 [project]
 name = "ratatoskr"
-version = "0.1.0"
+version = "0.2.0"
 description = "Ratatoskr, the squirrel running up and down Yggdrasil: carries your repos from an SSO-protected GitLab to another GitLab"
 readme = "README.md"
 authors = [
